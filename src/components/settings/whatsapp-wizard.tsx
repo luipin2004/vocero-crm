@@ -1,18 +1,42 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import Script from "next/script";
 import {
   AlertTriangle,
   CheckCircle2,
   Copy,
   Info,
   ShieldCheck,
+  Smartphone,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  isTrustedMetaOrigin,
+  parseEmbeddedSignupFinish,
+  type EmbeddedSignupFinish,
+} from "@/lib/meta/embedded-signup";
+
+declare global {
+  interface Window {
+    FB?: {
+      init(options: {
+        appId: string;
+        autoLogAppEvents: boolean;
+        xfbml: boolean;
+        version: string;
+      }): void;
+      login(
+        callback: (response: { authResponse?: { code?: string } }) => void,
+        options: Record<string, unknown>
+      ): void;
+    };
+  }
+}
 
 type Connection = {
   wabaId: string;
@@ -86,10 +110,200 @@ export function WhatsappWizard() {
         </div>
       )}
 
+      <EmbeddedSignupCard onConnected={() => void refetch()} />
+
       <ConnectForm existing={connection} onSaved={() => void refetch()} />
 
       {webhook && <WebhookCard webhook={webhook} />}
     </div>
+  );
+}
+
+type EmbeddedSignupConfiguration = {
+  configured: boolean;
+  appId: string | null;
+  configurationId: string | null;
+  graphVersion: string;
+};
+
+function EmbeddedSignupCard({ onConnected }: { onConnected: () => void }) {
+  const [configuration, setConfiguration] =
+    useState<EmbeddedSignupConfiguration | null>(null);
+  const [sdkReady, setSdkReady] = useState(false);
+  const [connecting, setConnecting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+  const codeRef = useRef<string | null>(null);
+  const finishRef = useRef<EmbeddedSignupFinish | null>(null);
+  const completingRef = useRef(false);
+
+  useEffect(() => {
+    void fetch("/api/settings/whatsapp/embedded-signup")
+      .then(async (response) =>
+        response.ok
+          ? ((await response.json()) as EmbeddedSignupConfiguration)
+          : null
+      )
+      .then(setConfiguration)
+      .catch(() => setConfiguration(null));
+  }, []);
+
+  const completeIfReady = useCallback(async () => {
+    const code = codeRef.current;
+    const finish = finishRef.current;
+    if (!code || !finish || completingRef.current) return;
+    completingRef.current = true;
+    setConnecting(true);
+    setError(null);
+
+    const response = await fetch("/api/settings/whatsapp/embedded-signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code, ...finish }),
+    }).catch(() => null);
+    const data = (await response?.json().catch(() => null)) as
+      | {
+          displayPhoneNumber?: string;
+          error?: { message?: string };
+        }
+      | null;
+    setConnecting(false);
+    completingRef.current = false;
+    codeRef.current = null;
+    finishRef.current = null;
+
+    if (!response?.ok) {
+      setError(
+        data?.error?.message ??
+          "No se pudo completar la conexión con Meta. Intenta nuevamente."
+      );
+      return;
+    }
+    setSuccess(
+      data?.displayPhoneNumber
+        ? `Coexistencia conectada con ${data.displayPhoneNumber}`
+        : "Coexistencia conectada correctamente"
+    );
+    onConnected();
+  }, [onConnected]);
+
+  useEffect(() => {
+    function receiveMessage(event: MessageEvent) {
+      if (!isTrustedMetaOrigin(event.origin)) return;
+      const finish = parseEmbeddedSignupFinish(event.data);
+      if (!finish) return;
+      finishRef.current = finish;
+      void completeIfReady();
+    }
+    window.addEventListener("message", receiveMessage);
+    return () => window.removeEventListener("message", receiveMessage);
+  }, [completeIfReady]);
+
+  const initializeSdk = useCallback(() => {
+    if (!configuration?.configured || !configuration.appId || !window.FB) {
+      return;
+    }
+    window.FB.init({
+      appId: configuration.appId,
+      autoLogAppEvents: true,
+      xfbml: true,
+      version: configuration.graphVersion,
+    });
+    setSdkReady(true);
+  }, [configuration]);
+
+  useEffect(() => {
+    if (configuration?.configured && window.FB && !sdkReady) {
+      initializeSdk();
+    }
+  }, [configuration, sdkReady, initializeSdk]);
+
+  function launch() {
+    if (
+      !window.FB ||
+      !configuration?.configured ||
+      !configuration.configurationId
+    ) {
+      setError("Embedded Signup todavía no está listo en Meta.");
+      return;
+    }
+    setError(null);
+    setSuccess(null);
+    codeRef.current = null;
+    finishRef.current = null;
+    setConnecting(true);
+
+    window.FB.login(
+      (response) => {
+        const code = response.authResponse?.code;
+        if (!code) {
+          setConnecting(false);
+          setError("La autorización se canceló o Meta no devolvió un código.");
+          return;
+        }
+        codeRef.current = code;
+        void completeIfReady();
+      },
+      {
+        config_id: configuration.configurationId,
+        response_type: "code",
+        override_default_response_type: true,
+        extras: {
+          featureType: "whatsapp_business_app_onboarding",
+          sessionInfoVersion: "3",
+        },
+      }
+    );
+  }
+
+  return (
+    <Card>
+      {configuration?.configured && (
+        <Script
+          src="https://connect.facebook.net/es_LA/sdk.js"
+          strategy="afterInteractive"
+          onLoad={initializeSdk}
+        />
+      )}
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Smartphone className="h-5 w-5" /> Usar el mismo número en WhatsApp
+          Business y Vocero
+        </CardTitle>
+        <CardDescription>
+          Embedded Signup activa la coexistencia oficial de Meta sin migrar el
+          número fuera de la aplicación WhatsApp Business.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {!configuration?.configured && (
+          <p className="rounded-md border border-[#ece2cf] bg-[#faf7f0] p-3 text-sm text-[#8a6d3b]">
+            Falta configurar en la instancia el App ID, App Secret y
+            Configuration ID de Embedded Signup. El número actual no se
+            modificará hasta completar esa configuración.
+          </p>
+        )}
+        {error && <p className="text-sm text-destructive">{error}</p>}
+        {success && (
+          <p className="flex items-center gap-2 text-sm text-success">
+            <CheckCircle2 className="h-4 w-4" /> {success}
+          </p>
+        )}
+        <Button
+          type="button"
+          disabled={!configuration?.configured || !sdkReady || connecting}
+          onClick={launch}
+        >
+          {connecting
+            ? "Conectando con Meta…"
+            : "Conectar WhatsApp Business existente"}
+        </Button>
+        <p className="text-xs text-muted-foreground">
+          Vocero solo guardará el token después de comprobar que el número
+          autorizado pertenece a la cuenta de WhatsApp seleccionada.
+        </p>
+      </CardContent>
+    </Card>
   );
 }
 
