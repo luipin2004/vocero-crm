@@ -120,8 +120,9 @@ Caddy emite el certificado HTTPS solo. Verifica con
 
 ## Conexión del número de WhatsApp
 
-Vocero **consume** un token de la WhatsApp Cloud API — no implementa el
-Embedded Signup. Hay dos formas de obtenerlo:
+Vocero **consume** un token de la WhatsApp Cloud API. Puede obtenerse pegando
+credenciales manualmente o mediante el Embedded Signup opcional incluido para
+coexistencia. Hay tres formas de conectarlo:
 
 ### Modo directo (el negocio tiene su propia app de Meta)
 
@@ -137,6 +138,26 @@ Embedded Signup. Hay dos formas de obtenerlo:
    `messages` (y `message_template_status_update` si usarás plantillas).
 5. Recomendado: agrega `META_APP_SECRET` (App Secret de tu app) a las
    variables de la instancia para la verificación de firma de cada evento.
+
+### Coexistencia con WhatsApp Business App (Embedded Signup)
+
+Este flujo conserva el número en la aplicación WhatsApp Business y lo conecta
+simultáneamente a Cloud API. Primero configura en Meta una configuración de
+**Facebook Login for Business** cuyo flujo incluya el feature type
+`whatsapp_business_app_onboarding`. Luego agrega a la instancia:
+
+```bash
+META_APP_ID=1234567890
+META_APP_SECRET=secreto_de_la_app
+META_EMBEDDED_SIGNUP_CONFIG_ID=9876543210
+```
+
+Reinicia la aplicación y abre **Configuración → WhatsApp → Conectar WhatsApp
+Business existente**. El App Secret se utiliza exclusivamente en el servidor
+para intercambiar el código efímero; el token resultante se valida contra la
+WABA y se guarda cifrado. No uses **Agregar número nuevo** para un número que
+deba permanecer en la app: ese es el flujo normal de registro/migración, no el
+de coexistencia.
 
 ### Modo agencia (Tech Provider) — para agencias
 
